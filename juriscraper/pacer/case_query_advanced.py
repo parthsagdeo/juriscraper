@@ -16,6 +16,8 @@ from ..lib.log_tools import make_default_logger
 from ..lib.string_utils import clean_string, convert_date_string, \
     force_unicode, harmonize
 
+from lxml import etree
+
 logger = make_default_logger()
 
 
@@ -213,16 +215,136 @@ class CaseQueryAdvancedBankruptcy(BaseCaseQueryAdvanced):
 
 class CaseQueryAdvancedDistrict(BaseCaseQueryAdvanced):
     """iQuery.pl for district cases
-
-    Not yet implemented. Unfortunately both the query parameters needed for the
-    query() method and the results parsed by the metadata() method are unique
-    across district and bankruptcy.
     """
-    def __init__(self):
-        raise NotImplementedError("This object is a stub.")
 
-    def query(self, *args, **kwargs):
-        raise NotImplementedError("This object is a stub")
+    @classmethod
+    def _get_row_dict(cls, cells):
+        row_data = {
+            'docket_number': cls.get_text_for_cell(cells[0]),
+            'case_name': clean_string(
+                harmonize(cls.get_text_for_cell(cells[1]))),
+            'date_filed': cls.get_text_for_cell(cells[2])
+        }
+        href = cells[0].xpath('.//@href')[0]
+        row_data['pacer_case_id'] = get_pacer_case_id_from_nonce_url(href)
+        return row_data
+
+    @property
+    def metadata(self):
+        if self._metadata is not None:
+            return self._metadata
+
+        class ParserState:
+            CaseRow1, CaseRow2, EmptyRow1, EmptyRow2 = range(4)
+
+        table_rows = self.tree.xpath('//table[@border="0" and @cellspacing="10"]//tr')
+        data = []
+
+        last_row = ParserState.EmptyRow2  # Pretend we're expecting a new case row
+        case_data = {}
+
+        for table_row in table_rows:
+            cells = table_row.xpath('./td')
+            if last_row == ParserState.CaseRow1:
+                if len(cells) == 0:
+                    last_row = ParserState.EmptyRow1
+                    data.append(case_data)
+                elif len(cells) == 3:  # This only happens for criminal cases, where there are two case rows in a row
+                    last_row = ParserState.CaseRow2
+                    data.append(self._get_row_dict(cells))  # Here, get only the second row (b/c it has the real info)
+                else:
+                    raise Exception("Error parsing table; weird # of cells where last_row = ParserState.CaseRow1")
+            elif last_row == ParserState.CaseRow2:
+                if len(cells) == 0:
+                    last_row = ParserState.EmptyRow1
+                else:
+                    raise Exception("Error parsing table; non-zero # of cells where last_row = ParserState.CaseRow2")
+            elif last_row == ParserState.EmptyRow1:
+                if len(cells) == 0:
+                    last_row = ParserState.EmptyRow2
+                else:
+                    raise Exception("Error parsing table; non-zero # of cells where last_row = ParserState.EmptyRow1")
+            elif last_row == ParserState.EmptyRow2:
+                if len(cells) == 3:
+                    case_data = self._get_row_dict(cells)
+                    last_row = ParserState.CaseRow1
+                else:
+                    raise Exception("Error parsing table; len(cells) != 3 where last_row = ParserState.EmptyRow2")
+
+        if last_row == ParserState.CaseRow1:
+            data.append(case_data)
+
+        data = clean_pacer_object(data)
+
+        self._metadata = data
+        return data
+
+    def query(self, name_last='', name_first='', name_middle='',
+              person_type='', filed_from=None, filed_to=None,
+              last_entry_from=None, last_entry_to=None, natures_of_suit=''):
+        """Use a district court's PACER query function to look up cases
+
+        At the top of every district PACER court, there's a button that says,
+        "Query". When you click that button, it either does a query for the
+        criteria you specify, returning a list of results or it returns the
+        specific case you were looking for, including metadata and a list of
+        reports you can run on that case.
+
+        This method only supports the use case where you are looking up
+        criteria.
+
+        :param name_last: The last name to look up.
+        :param name_first: The first name to look up.
+        :param name_middle: The middle name to look up.
+        :param person_type: What type the person is. See PACER for valid
+        entries.
+        :param filed_from: The date filed entry for the earliest possible
+        filing (inclusive).
+        :type filed_from: datetime.date
+        :param filed_to: The date filed value for the latest possible filing
+        (inclusive).
+        :type filed_to: datetime.date
+        :param last_entry_from: The earliest date that the last entry on the
+        docket can be from. I think.
+        :type last_entry_from: datetime.date
+        :param last_entry_to: The latest date that the last entry on the docket
+        can be from. I think.
+        :type last_entry_to: datetime.date
+        :param natures_of_suit: A Python list of nature of suit numbers that to
+        use for filtering. (See PACER for values.)
+
+        :return None: Instead, sets self.response attribute and runs
+        self.parse()
+        """
+        assert self.session is not None, \
+            "session attribute of DocketReport cannot be None."
+        assert all([filed_from, filed_to]) or \
+               not any([filed_from, filed_to]), \
+            "Both or neither of filing date fields must be complete."
+        assert all([last_entry_from, last_entry_to]) or \
+               not any([last_entry_from, last_entry_to]), \
+            "Both or neither of last entry date fields must be complete."
+
+        params = {}
+        if filed_from:
+            params[u'Qry_filed_from'] = filed_from.strftime(u'%m/%d/%Y')
+        if filed_to:
+            params[u'Qry_filed_to'] = filed_to.strftime(u'%m/%d/%Y')
+        if last_entry_from:
+            params[u'lastentry_from'] = last_entry_from.strftime(u'%m/%d/%Y')
+        if last_entry_to:
+            params[u'lastentry_to'] = last_entry_to.strftime(u'%m/%d/%Y')
+
+        params.update({
+            # Name fields
+            u'last_name': name_last,
+            u'first_name': name_first,
+            u'middle_name': name_middle,
+            u'person_type': person_type,
+        })
+        logger.info(u"Running advanced case query with params '%s'", params)
+        self.response = self.session.post(self.url + '?1-L_1_0-1', data=params)
+        self.parse()
 
 
 def _main():

@@ -1,7 +1,7 @@
 from .appellate_docket import AppellateDocketReport
 from .attachment_page import AttachmentPage
 from .case_query import CaseQuery
-from .case_query_advanced import CaseQueryAdvancedBankruptcy
+from .case_query_advanced import CaseQueryAdvancedBankruptcy, CaseQueryAdvancedDistrict
 from .docket_history_report import DocketHistoryReport
 from .docket_report import DocketReport
 from .free_documents import FreeOpinionReport
